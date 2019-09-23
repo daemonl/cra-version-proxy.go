@@ -73,6 +73,12 @@ func TestVersionSwitch(t *testing.T) {
 			expectPath:   "/v2/style.css",
 			expectCookie: "v2",
 		},
+		{
+			name:         "Parent Path Injection",
+			reqPath:      "/index.html?version=..",
+			expectPath:   "/index.html",
+			expectCookie: "..",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rw := httptest.NewRecorder()

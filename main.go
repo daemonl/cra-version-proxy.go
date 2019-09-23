@@ -2,12 +2,16 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -85,8 +89,15 @@ func (fs fileServer) doCacheFetch(rw http.ResponseWriter, req *http.Request, nam
 		return err
 	}
 
-	os.MkdirAll(path.Dir(path.Join(string(fs.root), name)), os.FileMode(0770))
-	cacheFile, err := os.Create(path.Join(string(fs.root), name))
+	//  Taken from http.Dir.Open
+	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) {
+		return errors.New("http: invalid character in file path")
+	}
+	fullName := filepath.Join(string(fs.root), filepath.FromSlash(path.Clean("/"+name)))
+	// Done with http.Dir.Open clone
+
+	os.MkdirAll(filepath.Dir(fullName), os.FileMode(0770))
+	cacheFile, err := os.Create(fullName)
 	if err != nil {
 		return err
 	}
@@ -97,6 +108,7 @@ func (fs fileServer) doCacheFetch(rw http.ResponseWriter, req *http.Request, nam
 }
 
 func (fs fileServer) tryServeFile(rw http.ResponseWriter, req *http.Request, name string) error {
+	// http.Dir.Open ensures the file is rooted at root.
 	f, err := fs.root.Open(name)
 	if err != nil {
 		return err
@@ -125,6 +137,8 @@ func (fs fileServer) tryServeFile(rw http.ResponseWriter, req *http.Request, nam
 }
 
 const VERSION_COOKIE_NAME = "version-override"
+
+var reVersionUnsafe = regexp.MustCompile(`[^a-zA-Z0-9]`)
 
 // VersionSwitch rewrites requests to a directory prefixed with the requested
 // or default version.  The version can be set with a querystirng version= or
@@ -168,8 +182,10 @@ func VersionSwitch(defaultVersion string) func(http.Handler) http.Handler {
 				rw.Header().Set("Cache-Control", "no-store")
 			}
 
-			req.URL.Path = "/" + path.Join(version, req.URL.Path)
-
+			version = url.PathEscape(version)
+			newPath := path.Clean("/" + path.Join(version, req.URL.Path))
+			log.Printf("Serve %s with version %s => %s", req.URL.Path, version, newPath)
+			req.URL.Path = newPath
 			next.ServeHTTP(rw, req)
 		})
 	}
