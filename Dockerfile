@@ -1,5 +1,6 @@
 FROM golang:1.13 AS builder
-COPY main.go .
+COPY *.go .
+RUN go test *.go
 RUN go build -o /proxy-server ./main.go
 
 FROM alpine:latest  
