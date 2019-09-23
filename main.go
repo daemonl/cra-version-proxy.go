@@ -20,15 +20,17 @@ func doError(rw http.ResponseWriter, req *http.Request, err error) {
 	rw.WriteHeader(500)
 }
 
+const EnvVarPrefix = "CRA_PROXY_"
+
 func main() {
-	sourceURL, err := url.Parse(os.Getenv("SOURCE_URL"))
+	sourceURL, err := url.Parse(os.Getenv(EnvVarPrefix + "SOURCE"))
 	if err != nil {
 		log.Fatalf("Invalid url in $SOURCE_URL: %s", err.Error())
 	}
 
-	cacheDir := os.Getenv("CACHE_DIR")
-	bindAddress := os.Getenv("BIND")
-	defaultVersion := os.Getenv("DEFAULT_VERSION")
+	cacheDir := os.Getenv(EnvVarPrefix + "CACHE_DIR")
+	bindAddress := os.Getenv(EnvVarPrefix + "BIND")
+	defaultVersion := os.Getenv(EnvVarPrefix + "DEFAULT_VERSION")
 
 	var handler http.Handler
 
@@ -42,6 +44,7 @@ func main() {
 
 	handler = VersionSwitch(defaultVersion)(handler)
 	handler = AppRewrite(handler)
+	handler = Logger(handler)
 
 	if err := http.ListenAndServe(bindAddress, handler); err != nil {
 		log.Fatal(err.Error())
@@ -184,7 +187,6 @@ func VersionSwitch(defaultVersion string) func(http.Handler) http.Handler {
 
 			version = url.PathEscape(version)
 			newPath := path.Clean("/" + path.Join(version, req.URL.Path))
-			log.Printf("Serve %s with version %s => %s", req.URL.Path, version, newPath)
 			req.URL.Path = newPath
 			next.ServeHTTP(rw, req)
 		})
@@ -199,4 +201,38 @@ func AppRewrite(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(rw, req)
 	})
+}
+
+func Logger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		begin := time.Now()
+		originalPath := req.URL.Path
+		recorder := &resRecorder{ResponseWriter: rw}
+		next.ServeHTTP(recorder, req)
+		log.Printf("%s %s => %d. In %f seconds. Path Rewrite to %s. Cache: %s",
+			req.Method,
+			originalPath,
+			recorder.status,
+			time.Since(begin).Seconds(),
+			req.URL.Path,
+			recorder.header.Get("X-Cache"),
+		)
+	})
+}
+
+type resRecorder struct {
+	http.ResponseWriter
+	status int
+	header http.Header
+}
+
+func (rr *resRecorder) Header() http.Header {
+	hdr := rr.ResponseWriter.Header()
+	rr.header = hdr
+	return hdr
+}
+
+func (rr *resRecorder) WriteHeader(status int) {
+	rr.status = status
+	rr.ResponseWriter.WriteHeader(status)
 }
