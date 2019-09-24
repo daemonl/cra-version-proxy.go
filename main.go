@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,11 +17,6 @@ import (
 	"strings"
 	"time"
 )
-
-func doError(rw http.ResponseWriter, req *http.Request, err error) {
-	log.Printf("ERROR: %s", err.Error())
-	rw.WriteHeader(500)
-}
 
 const EnvVarPrefix = "CRA_PROXY_"
 
@@ -46,9 +44,26 @@ func main() {
 	handler = AppRewrite(handler)
 	handler = Logger(handler)
 
+	if proxyConfigFile := os.Getenv(EnvVarPrefix + "DEV_PATHS"); proxyConfigFile != "" {
+		proxyConfig := []ProxyConfig{}
+		if err := loadJSONFile(proxyConfigFile, &proxyConfig); err != nil {
+			log.Fatalf("Loading Proxy Config %s", err.Error())
+		}
+		handler = ProxyPaths(proxyConfig)(handler)
+	}
+
 	if err := http.ListenAndServe(bindAddress, handler); err != nil {
 		log.Fatal(err.Error())
 	}
+}
+
+func loadJSONFile(filename string, into interface{}) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return json.NewDecoder(f).Decode(into)
 }
 
 type fileServer struct {
@@ -235,4 +250,83 @@ func (rr *resRecorder) Header() http.Header {
 func (rr *resRecorder) WriteHeader(status int) {
 	rr.status = status
 	rr.ResponseWriter.WriteHeader(status)
+}
+
+type ProxyConfig struct {
+	Prefix string `json:"prefix"`
+	Target string `json:"target"`
+}
+
+func ProxyPaths(configs []ProxyConfig) func(http.Handler) http.Handler {
+	var proxyClient = &http.Client{
+		Timeout: time.Second * 60,
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+			reqPath := req.URL.Path
+			for _, proxyPath := range configs {
+				if strings.HasPrefix(reqPath, proxyPath.Prefix) {
+					urlOut, err := url.Parse(proxyPath.Target)
+					if err != nil {
+						doError(rw, req, err)
+						return
+					}
+					urlOut.Path = reqPath
+					req.URL = urlOut
+					log.Printf("Dev Proxy to %s", urlOut.String())
+					if err := doProxy(rw, req, proxyClient); err != nil {
+						log.Printf("ERROR: %s", err.Error())
+						rw.WriteHeader(http.StatusBadGateway)
+					}
+					return
+				}
+			}
+
+			next.ServeHTTP(rw, req)
+		})
+	}
+}
+
+func doError(rw http.ResponseWriter, req *http.Request, err error) {
+	log.Printf("ERROR: %s", err.Error())
+	rw.WriteHeader(500)
+}
+
+func doProxy(rw http.ResponseWriter, reqIn *http.Request, client *http.Client) error {
+	body, err := ioutil.ReadAll(reqIn.Body)
+	reqIn.Body.Close()
+	if err != nil {
+		return err
+	}
+	reqOut, err := http.NewRequest(reqIn.Method, reqIn.URL.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+
+	for k, vs := range reqIn.Header {
+		if strings.ToLower(k) == "content-length" {
+			continue
+		}
+		for _, v := range vs {
+			reqOut.Header.Add(k, v)
+		}
+	}
+
+	resBack, err := client.Do(reqOut)
+	if err != nil {
+		return err
+	}
+	reqIn.Body.Close()
+	defer resBack.Body.Close()
+
+	rwHeader := rw.Header()
+	for k, vs := range resBack.Header {
+		for _, v := range vs {
+			rwHeader.Add(k, v)
+		}
+	}
+	rw.WriteHeader(resBack.StatusCode)
+
+	_, err = io.Copy(rw, resBack.Body)
+	return err
 }
