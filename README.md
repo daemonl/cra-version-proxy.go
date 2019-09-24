@@ -1,4 +1,3 @@
-[![codecov](https://codecov.io/gh/daemonl/cra-version-proxy.go/branch/master/graph/badge.svg)](https://codecov.io/gh/daemonl/cra-version-proxy.go)
 [![Docker Cloud Build Status](https://img.shields.io/docker/cloud/build/daemonl/cra-version-proxy)](https://hub.docker.com/r/daemonl/cra-version-proxy)
 ![GitHub](https://img.shields.io/github/license/daemonl/cra-version-proxy.go)
 
