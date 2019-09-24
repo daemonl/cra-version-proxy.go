@@ -272,6 +272,7 @@ func ProxyPaths(configs []ProxyConfig) func(http.Handler) http.Handler {
 						return
 					}
 					urlOut.Path = reqPath
+					urlOut.RawQuery = req.URL.RawQuery
 					req.URL = urlOut
 					log.Printf("Dev Proxy to %s", urlOut.String())
 					if err := doProxy(rw, req, proxyClient); err != nil {
