@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -31,16 +33,29 @@ func main() {
 	defaultVersion := os.Getenv(EnvVarPrefix + "DEFAULT_VERSION")
 
 	var handler http.Handler
+	sourceClient := &http.Client{
+		Timeout: time.Second * 10,
+	}
 
 	handler = fileServer{
 		root:      http.Dir(cacheDir),
 		sourceURL: sourceURL,
-		client: &http.Client{
-			Timeout: time.Second * 10,
-		},
+		client:    sourceClient,
 	}
 
-	handler = VersionSwitch(defaultVersion)(handler)
+	var defaultVersionFunc func() string
+	if defaultVersion != "" {
+		defaultVersionFunc = func() string {
+			return defaultVersion
+		}
+	} else {
+		defaultVersionFunc, err = defaultVersionPoller(sourceClient, sourceURL.String()+"/default-version.txt")
+		if err != nil {
+			log.Fatalf("Fetching default version: %s", err.Error())
+		}
+	}
+
+	handler = VersionSwitch(defaultVersionFunc)(handler)
 	handler = AppRewrite(handler)
 	handler = Logger(handler)
 
@@ -64,6 +79,57 @@ func loadJSONFile(filename string, into interface{}) error {
 	}
 	defer f.Close()
 	return json.NewDecoder(f).Decode(into)
+}
+
+func defaultVersionPoller(client *http.Client, url string) (func() string, error) {
+	mutex := sync.RWMutex{}
+
+	fetchVersion := func() (string, error) {
+		res, err := client.Get(url)
+		if err != nil {
+			return "", err
+		}
+		defer res.Body.Close()
+		if res.StatusCode != 200 {
+			return "", fmt.Errorf("HTTP %s getting version", res.Status)
+		}
+		versionBytes, err := ioutil.ReadAll(res.Body)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(versionBytes)), nil
+	}
+
+	defaultVersion, err := fetchVersion()
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("Default Version from source: '%s'", defaultVersion)
+
+	go func() {
+		for {
+			newVersion, err := fetchVersion()
+			if err != nil {
+				log.Printf(err.Error())
+				time.Sleep(time.Second * 5)
+				continue
+			}
+
+			mutex.Lock()
+			if defaultVersion != newVersion {
+				log.Printf("Updating default version to '%s'", newVersion)
+			}
+			defaultVersion = newVersion
+			mutex.Unlock()
+			time.Sleep(time.Minute)
+		}
+	}()
+
+	return func() string {
+		mutex.RLock()
+		defer mutex.RUnlock()
+		return defaultVersion
+	}, nil
 }
 
 type fileServer struct {
@@ -163,11 +229,11 @@ var reVersionUnsafe = regexp.MustCompile(`[^a-zA-Z0-9]`)
 // cookie. When the querystring parameter is set, the cookie is sent with the
 // response so that requests for resources in HTML pages (css, images etc) will
 // also get the correct prefix.
-func VersionSwitch(defaultVersion string) func(http.Handler) http.Handler {
+func VersionSwitch(defaultVersion func() string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 
-			version := defaultVersion
+			var version string
 			if queryVersion := req.URL.Query().Get("version"); queryVersion != "" {
 				// read the requested version from the QS
 				version = queryVersion
@@ -198,6 +264,8 @@ func VersionSwitch(defaultVersion string) func(http.Handler) http.Handler {
 				// Don't cache versioned resources (Cookies are not considered
 				// by browsers when looking up cached responses)
 				rw.Header().Set("Cache-Control", "no-store")
+			} else {
+				version = defaultVersion()
 			}
 
 			version = url.PathEscape(version)
